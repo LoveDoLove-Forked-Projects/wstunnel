@@ -13,10 +13,14 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "loc
 wstunnel = { path = "../wstunnel", default-features = false, features = ["clap"] }
 
 tikv-jemallocator = { version = "0.7", optional = true }
+# Heap profiler for `scripts/bench.sh --dhat`. Replaces the global allocator, so it is
+# mutually exclusive with `jemalloc` and never enabled in a normal build.
+dhat = { version = "0.3.3", optional = true }
 
 [features]
 default = ["aws-lc-rs"]
 jemalloc = ["dep:tikv-jemallocator"]
+dhat-heap = ["dep:dhat"]
 aws-lc-rs = ["wstunnel/aws-lc-rs"]
 ring = ["wstunnel/ring"]
 aws-lc-rs-bindgen = ["wstunnel/aws-lc-rs-bindgen"]

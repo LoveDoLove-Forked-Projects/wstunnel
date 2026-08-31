@@ -13,9 +13,16 @@ use wstunnel::{run_client, run_server};
 #[cfg(feature = "jemalloc")]
 use tikv_jemallocator::Jemalloc;
 
+#[cfg(all(feature = "jemalloc", feature = "dhat-heap"))]
+compile_error!("`jemalloc` and `dhat-heap` both install a global allocator, enable only one");
+
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static GLOBAL: dhat::Alloc = dhat::Alloc;
 
 /// Use Websocket or HTTP2 protocol to tunnel {TCP,UDP} traffic
 /// wsTunnelClient <---> wsTunnelServer <---> RemoteHost
@@ -60,6 +67,18 @@ pub enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
+    // Writes its profile when dropped, which is why the profiling build below waits for ctrl-c and
+    // returns instead of running until it is killed. `WSTUNNEL_DHAT_OUT` names the file, so a
+    // client and a server profiled together do not both write dhat-heap.json.
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = {
+        let mut builder = dhat::Profiler::builder();
+        if let Ok(path) = std::env::var("WSTUNNEL_DHAT_OUT") {
+            builder = builder.file_name(path);
+        }
+        builder.build()
+    };
+
     let args = Wstunnel::parse();
 
     // Setup logging
@@ -107,22 +126,34 @@ fn main() -> anyhow::Result<()> {
         // Start system CA reloader
         SystemCaReloader::start(None);
 
-        match args.commands {
-            Commands::Client(args) => {
-                run_client(*args, DefaultTokioExecutor::default())
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!("Cannot start wstunnel client: {err:?}");
-                    });
+        let run = async {
+            match args.commands {
+                Commands::Client(args) => {
+                    run_client(*args, DefaultTokioExecutor::default())
+                        .await
+                        .unwrap_or_else(|err| {
+                            panic!("Cannot start wstunnel client: {err:?}");
+                        });
+                }
+                Commands::Server(args) => {
+                    run_server(*args, DefaultTokioExecutor::default())
+                        .await
+                        .unwrap_or_else(|err| {
+                            panic!("Cannot start wstunnel server: {err:?}");
+                        });
+                }
             }
-            Commands::Server(args) => {
-                run_server(*args, DefaultTokioExecutor::default())
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!("Cannot start wstunnel server: {err:?}");
-                    });
-            }
+        };
+
+        // A normal build runs until it is killed. A heap-profiling build has to leave main for the
+        // profiler to write its output, so there ctrl-c unwinds instead of terminating the process.
+        #[cfg(feature = "dhat-heap")]
+        tokio::select! {
+            _ = run => {}
+            _ = tokio::signal::ctrl_c() => tracing::info!("shutting down to flush the heap profile"),
         }
+        #[cfg(not(feature = "dhat-heap"))]
+        run.await;
 
         Ok(())
     })
